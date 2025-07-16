@@ -1,0 +1,8 @@
+datasets==3.5.0
+einops==0.8.1
+torch==2.4.1
+torchaudio==2.5.0.dev20241118
+torchvision==0.19.1
+tqdm==4.67.1
+numpy==2.0.1
+matplotlib==3.10.1
