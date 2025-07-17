@@ -118,9 +118,10 @@ class Attention(nn.Module):
     return out
 
 
-class SimpleViT(nn.Module):
+class NotViT(nn.Module):
   def __init__(self, embed_size, input_h, input_w, patch_size=2, num_classes=10):
     """
+    Just naive embedder, one block of self attention and classification head
     embed_size  -   dimensionality of the embeddings produced by the patch encoder
     d_model     -   dimensionality of the self-attention output (equal to embed_size in this implementation)
     """
