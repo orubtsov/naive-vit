@@ -27,7 +27,7 @@ The project is structured to progressively implement core components of ViT from
     pip install -r requirements.txt
     ```
 
-2. Run notebooks one by one inside the `notebooks/` folder **OR** execute `train.py` for end-to-end training.
+2. Run notebooks one by one inside the `notebooks/` folder.
 
 ## 📌 Notes
 

@@ -145,3 +145,45 @@ class NotViT(nn.Module):
     out = out.mean(dim = 1)
     return out
 
+class FeedForward(nn.Module):
+  def __init__(self, embed_size, scale=4):
+    super().__init__()
+    self.scale = scale
+    self.net = nn.Sequential(nn.Linear(embed_size, self.scale * embed_size),
+                             nn.GELU(),
+                             nn.Linear(self.scale * embed_size, embed_size)
+    )
+  def forward(self, x):
+    return self.net(x)
+
+class NaiveViT(nn.Module):
+  def __init__(self, embed_size, input_h, input_w, patch_size=2, num_classes=10, scale=4):
+    """
+    embed_size  -   size of embedding produced by patch encoder
+    d_model     -   size of self attention output
+    """
+    super().__init__()
+
+    self.embedder = ImageEmbedderPE(patch_size, embed_size, img_h=input_h, img_w=input_w)
+    self.sa = Attention(embed_size, head_size=embed_size)
+    self.norm1 = nn.LayerNorm(embed_size)
+    self.norm2 = nn.LayerNorm(embed_size)
+    self.ffn = FeedForward(embed_size, scale=scale)
+
+    self.classification_head = nn.Linear(embed_size, num_classes)
+
+  def forward(self, x):
+
+    emb = self.embedder(x)                  # (B, T, embed_size)
+    res = emb
+    emb = self.norm1(emb)
+    emb = res + self.sa(emb, emb, emb)      # (B, T, embed_size)
+
+    res = emb
+    emb = self.norm2(emb)
+    emb = res + self.ffn(emb)
+    out = self.classification_head(emb)     # (B, T, num_classes)
+    # But we need prediction of shape B x num_classes.
+    # If eache token represents part of an image to get class of an whole image for now we can simply average predictions over the first dimention
+    out = out.mean(dim = 1)                 # (B, num_classes)
+    return out
