@@ -17,7 +17,7 @@ The project is structured to progressively implement core components of ViT from
 - Multi-head self-attention from scratch
 - Transformer blocks for vision
 - Classification head and training loop
-- Proper training/validation workflow with `tqdm`
+- CLS token
 
 ## 🚀 How to Run
 
