@@ -55,47 +55,116 @@ def posemb_sincos_2d(h, w, dim, temperature: int = 10000, dtype = torch.float32)
 
 
 class ImageEmbedder(nn.Module):
-  def __init__(self, patch_size, embed_size, channels = 3):
-    super().__init__()
-    self.patch_size = patch_size
-    self.embed_size = embed_size
-    self.patch_dim = self.patch_size * self.patch_size * channels
+    """
+    Converts an input image into a sequence of flat patch embeddings using a linear projection.
 
-    self.to_flat_patches = Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = self.patch_size, p2=self.patch_size)
+    This class does not apply any positional encoding. It simply splits the image into
+    non-overlapping patches, flattens them, and projects each patch to a fixed embedding size.
 
-    self.embedder = nn.Linear(self.patch_dim, self.embed_size)    # Differs from transformers with trainable vocabulary
+    Args:
+        patch_size (int): Size of the square image patches (e.g., 16).
+        embed_size (int): Dimensionality of each patch embedding.
+        channels (int): Number of image input channels (default: 3 for RGB).
 
-  def forward(self, x):
-    # x (B,H,W,C)
-    x = self.to_flat_patches(x) # x-> patches  shape = (B,(H*W)/(patch_size**2), patch_size*patch_size*C)
-    print(x.size())
-    out = self.embedder(x)      # B, (H*W)/(patch_size**2), embed_size
-    return out
+    Inputs:
+        x (Tensor): Input image tensor of shape (B, C, H, W)
+
+    Returns:
+        out (Tensor): Patch embeddings of shape (B, T, embed_size),
+                      where T = (H * W) / (patch_size ** 2)
+    """
+    def __init__(self, patch_size, embed_size, channels=3):
+        super().__init__()
+        self.patch_size = patch_size
+        self.embed_size = embed_size
+        self.patch_dim = patch_size * patch_size * channels
+
+        # Convert image to flattened patches: (B, C, H, W) → (B, T, patch_dim)
+        self.to_flat_patches = Rearrange(
+            'b c (h p1) (w p2) -> b (h w) (p1 p2 c)',
+            p1=patch_size, p2=patch_size
+        )
+
+        # Linear projection of each flattened patch to embedding space
+        self.embedder = nn.Linear(self.patch_dim, embed_size)
+
+    def forward(self, x):
+        # x: (B, C, H, W)
+        x = self.to_flat_patches(x)  # (B, T, patch_dim)
+        print(x.size())              # For debugging: show patch shape
+        out = self.embedder(x)       # (B, T, embed_size)
+        return out
 
 
 class ImageEmbedderPE(nn.Module):
-  def __init__(self, patch_size, embed_size, img_h, img_w, channels = 3):
-    super().__init__()
-    self.patch_size = patch_size
-    self.embed_size = embed_size
-    self.patch_dim = self.patch_size * self.patch_size * channels
+    """
+    Converts an input image into a sequence of patch embeddings and adds 2D sinusoidal positional encoding.
 
-    self.to_flat_patches = Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = self.patch_size, p2=self.patch_size)
+    The positional encoding is fixed and precomputed in __init__, meaning this module
+    only supports a single fixed image size. For variable-size support, consider computing
+    PE dynamically in the forward pass.
 
-    self.embedder = nn.Linear(self.patch_dim, self.embed_size)    # Differs from transformers with trainable vocabulary
-    self.pe_table = posemb_sincos_2d(img_h//self.patch_size, img_w//self.patch_size, dim=self.embed_size)
+    Args:
+        patch_size (int): Size of the square image patches.
+        embed_size (int): Dimensionality of each patch embedding.
+        img_h (int): Height of the input image in pixels.
+        img_w (int): Width of the input image in pixels.
+        channels (int): Number of input channels (default: 3 for RGB).
 
-  def forward(self, x):
-    # x (B,H,W,C)
-    device = x.device
-    x = self.to_flat_patches(x)                         # x-> patches  shape = (B,(H*W)/(patch_size**2), patch_size*patch_size*C)
-    x = self.embedder(x)                                # B, (H*W)/(patch_size**2), embed_size
-    out = x + self.pe_table.to(device, dtype=x.dtype)   # But it has constant size so it wouldn't work with images of different sizes
-                                                        # To fix it PE could be calculated during forward call
-    return out
+    Inputs:
+        x (Tensor): Input image tensor of shape (B, C, H, W)
+
+    Returns:
+        out (Tensor): Patch embeddings with positional encodings of shape (B, T, embed_size)
+    """
+    def __init__(self, patch_size, embed_size, img_h, img_w, channels=3):
+        super().__init__()
+        self.patch_size = patch_size
+        self.embed_size = embed_size
+        self.patch_dim = patch_size * patch_size * channels
+
+        # Patch flattening: (B, C, H, W) → (B, T, patch_dim)
+        self.to_flat_patches = Rearrange(
+            'b c (h p1) (w p2) -> b (h w) (p1 p2 c)',
+            p1=patch_size, p2=patch_size
+        )
+
+        self.embedder = nn.Linear(self.patch_dim, embed_size)
+
+        # Fixed positional encoding for a fixed image size
+        # PE shape: (T, D) → will be broadcasted to (B, T, D)
+        self.pe_table = posemb_sincos_2d(
+            img_h // patch_size,
+            img_w // patch_size,
+            dim=embed_size
+        )
+
+    def forward(self, x):
+        # x: (B, C, H, W)
+        device = x.device
+        x = self.to_flat_patches(x)           # (B, T, patch_dim)
+        x = self.embedder(x)                  # (B, T, embed_size)
+        out = x + self.pe_table.to(device, dtype=x.dtype)  # (B, T, embed_size)
+        return out
   
 
 class Attention(nn.Module):
+  """
+  Simple Attention module implementation with no optimizations
+
+  Args:
+        embed_size (int): Dimensionality of patch embeddings.
+        head_size (int): Dimensionality of inner dim.
+
+    Inputs:
+        q (Tensor): Input tensor of shape (B, T, C)
+        k (Tensor): Input tensor of shape (B, T, C)
+        v (Tensor): Input tensor of shape (B, T, C)
+
+    Returns:
+        out (Tensor): Tensor of shape (B,T,C)
+
+  """
   def __init__(self, embed_size, head_size):
     super().__init__()
     self.q_proj = nn.Linear(embed_size, head_size, bias=False)
@@ -105,12 +174,11 @@ class Attention(nn.Module):
 
   def forward(self, q, k, v):
 
-    q = self.q_proj(q)
+    q = self.q_proj(q)      # q, k, v: (B, T, head_size)
     k = self.k_proj(k)
-
-    scores = F.softmax(q @ k.transpose(-2, -1) * self.scale, dim=-1)     # (B,T,C) @ (B,C,T) -> (B,T,T)
     v = self.v_proj(v)
-    out = scores @ v                                                     # (B,T,T) @ (B,T,C) -> (B,T,C)
+    scores = F.softmax(q @ k.transpose(-2, -1) * self.scale, dim=-1)     # (B,T,head_size) @ (B,head_size,T) -> (B, T, T) — attention weights between tokens
+    out = scores @ v                                                     # (B,T,T) @ (B,T,head_size) -> (B,T,head_size)
     return out
 
 
@@ -153,18 +221,27 @@ class NotViT(nn.Module):
     return out
 
 class FeedForward(nn.Module):
-  def __init__(self, embed_size, scale=4):
-    super().__init__()
-    self.scale = scale
-    self.net = nn.Sequential(nn.Linear(embed_size, self.scale * embed_size),
-                             nn.GELU(),
-                             nn.Linear(self.scale * embed_size, embed_size)
-    )
-  def forward(self, x):
-    return self.net(x)
+    """
+    A two-layer MLP used in Transformer blocks.
+
+    Args:
+        embed_size (int): Size of the input and output features.
+        mlp_ratio (int): Expansion factor for the hidden layer (typically 4).
+    """
+    def __init__(self, embed_size, mlp_ratio=4):
+        super().__init__()
+        hidden_dim = embed_size * mlp_ratio
+        self.net = nn.Sequential(
+            nn.Linear(embed_size, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, embed_size)
+        )
+
+    def forward(self, x):
+        return self.net(x)
 
 class NaiveViT(nn.Module):
-  def __init__(self, embed_size, input_h, input_w, patch_size=2, num_classes=10, scale=4):
+  def __init__(self, embed_size, input_h, input_w, patch_size=2, num_classes=10, mlp_ratio=4):
     """
     embed_size  -   size of embedding produced by patch encoder
     d_model     -   size of self attention output
@@ -175,7 +252,7 @@ class NaiveViT(nn.Module):
     self.sa = Attention(embed_size, head_size=embed_size)
     self.norm1 = nn.LayerNorm(embed_size)
     self.norm2 = nn.LayerNorm(embed_size)
-    self.ffn = FeedForward(embed_size, scale=scale)
+    self.ffn = FeedForward(embed_size, mlp_ratio=mlp_ratio)
 
     self.classification_head = nn.Linear(embed_size, num_classes)
 
