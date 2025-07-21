@@ -48,11 +48,7 @@ def posemb_sincos_2d(h, w, dim, temperature: int = 10000, dtype = torch.float32)
     assert (dim % 4) == 0, "feature dimension must be multiple of 4 for sincos emb"
     omega = torch.arange(dim // 4) / (dim // 4 - 1)                 # 2i/d
     omega = 1.0 / (temperature ** omega)                            # 1 / (10000 ^ (2i/d))
-    # print(omega[None, :].size())
-    # print(y.flatten().size(), y.flatten()[:, None].size())
-    # print(x.flatten())
     y = y.flatten()[:, None] * omega[None, :]                       # pos * (1 / (10000 ^ (2i/d)))  y.size ()
-    # print(y)
     x = x.flatten()[:, None] * omega[None, :]
     pe = torch.cat((x.sin(), x.cos(), y.sin(), y.cos()), dim=1)     # sin(pos * (1 / (10000 ^ (2i/d)))) cos(pos * (1 / (10000 ^ (2i/d))))
     return pe.type(dtype)
@@ -119,12 +115,23 @@ class Attention(nn.Module):
 
 
 class NotViT(nn.Module):
-  def __init__(self, embed_size, input_h, input_w, patch_size=2, num_classes=10):
-    """
+  """
     Just naive embedder, one block of self attention and classification head
-    embed_size  -   dimensionality of the embeddings produced by the patch encoder
-    d_model     -   dimensionality of the self-attention output (equal to embed_size in this implementation)
+
+    Args:
+        embed_size (int): Dimensionality of patch embeddings.
+        input_h (int): Height of input images.
+        input_w (int): Width of input images.
+        patch_size (int): Size of square patches to split the image into.
+        num_classes (int): Number of output classes.
+
+    Inputs:
+        x (Tensor): Input image tensor of shape (B, C, H, W)
+
+    Returns:
+        out (Tensor): Logits of shape (B, num_classes)
     """
+  def __init__(self, embed_size, input_h, input_w, patch_size=2, num_classes=10):
     super().__init__()
 
     self.embedder = ImageEmbedderPE(patch_size, embed_size, img_h=input_h, img_w=input_w)
@@ -187,3 +194,207 @@ class NaiveViT(nn.Module):
     # If eache token represents part of an image to get class of an whole image for now we can simply average predictions over the first dimention
     out = out.mean(dim = 1)                 # (B, num_classes)
     return out
+  
+
+class MultiHeadAttention(nn.Module):
+    """
+    Multi-head attention layer using multiple independent attention heads.
+    This is a naïve implementation where each head is a separate Attention module.
+
+    Args:
+        embed_size (int): The dimensionality of the input embeddings.
+        dim (int): The output dimensionality of each attention output (typically equal to embed_size).
+        num_heads (int): The number of attention heads.
+
+    Inputs:
+        q, k, v (Tensor): Query, Key, and Value tensors of shape (B, T, D), where
+                          B = batch size, T = sequence length, D = embed_size.
+
+    Returns:
+        out (Tensor): Output tensor of shape (B, T, dim).
+    """
+    def __init__(self, embed_size, dim, num_heads):
+        super().__init__()
+        assert dim % num_heads == 0, "Dimension must be divisible by number of heads."
+
+        self.heads = nn.ModuleList([
+            Attention(embed_size, head_size=dim // num_heads)
+            for _ in range(num_heads)
+        ])
+        self.proj = nn.Linear(dim, dim)
+
+    def forward(self, q, k, v):
+        # Concatenate the outputs from all heads along the last dimension
+        x = torch.cat([h(q, k, v) for h in self.heads], dim=-1)  # (B, T, dim)
+        out = self.proj(x)  # Final projection to match input dim
+        return out
+
+
+class TransformerBlock(nn.Module):
+    """
+    A single Transformer block consisting of multi-head self-attention, LayerNorms, and a feedforward network.
+
+    Args:
+        embed_size (int): Dimensionality of input embeddings.
+        dim (int): Dimensionality of internal representations (typically equal to embed_size).
+        num_heads (int): Number of attention heads in the MultiHeadAttention layer.
+
+    Inputs:
+        x (Tensor): Input tensor of shape (B, T, D)
+
+    Returns:
+        out (Tensor): Output tensor of shape (B, T, D)
+    """
+    def __init__(self, embed_size, dim, num_heads):
+        super().__init__()
+        self.sa = MultiHeadAttention(embed_size, dim, num_heads)
+        self.norm1 = nn.LayerNorm(dim)
+        self.norm2 = nn.LayerNorm(dim)
+        self.ffn = FeedForward(dim)
+
+    def forward(self, x):
+        # Self-attention block with residual connection
+        res = x
+        x = self.norm1(x)
+        x = res + self.sa(x, x, x)
+
+        # Feedforward block with residual connection
+        res = x
+        x = self.norm2(x)
+        out = res + self.ffn(x)
+        return out
+
+
+class SimpleViT(nn.Module):
+    """
+    A simplified Vision Transformer for image classification.
+
+    Args:
+        embed_size (int): Dimensionality of patch embeddings.
+        input_h (int): Height of input images.
+        input_w (int): Width of input images.
+        patch_size (int): Size of square patches to split the image into.
+        num_classes (int): Number of output classes.
+        depth (int): Number of Transformer blocks in the encoder.
+        num_heads (int): Number of attention heads in each block.
+
+    Inputs:
+        x (Tensor): Input image tensor of shape (B, C, H, W)
+
+    Returns:
+        out (Tensor): Logits of shape (B, num_classes)
+    """
+    def __init__(self, embed_size, input_h, input_w, patch_size=2, num_classes=10, depth=4, num_heads=8):
+        super().__init__()
+
+        self.embedder = ImageEmbedderPE(
+            patch_size,
+            embed_size,
+            img_h=input_h,
+            img_w=input_w
+        )
+
+        self.transformer = nn.Sequential(
+            *[TransformerBlock(embed_size=embed_size, dim=embed_size, num_heads=num_heads)
+              for _ in range(depth)]
+        )
+
+        self.classification_head = nn.Linear(embed_size, num_classes, bias=False)
+
+    def forward(self, x):
+        # Convert image to patch embeddings + positional encodings
+        emb = self.embedder(x)  # (B, T, D)
+
+        # Pass through transformer encoder
+        latents = self.transformer(emb)  # (B, T, D)
+
+        # Aggregate over sequence dimension (average pooling)
+        latents = latents.mean(dim=1)  # (B, D)
+
+        # Final classification layer
+        out = self.classification_head(latents)  # (B, num_classes)
+        return out
+    
+
+class ImageEmbedderClsPE(nn.Module):
+    """
+    Converts an image into a sequence of patch embeddings with fixed 2D sinusoidal positional encoding
+    and prepends a learnable CLS token.
+
+    Args:
+        patch_size (int): Size of square patches to divide the image.
+        embed_size (int): Size of output embedding per patch.
+        img_h (int): Input image height.
+        img_w (int): Input image width.
+        channels (int): Number of input channels. Default is 3.
+
+    Inputs:
+        x (Tensor): Input tensor of shape (B, C, H, W)
+
+    Returns:
+        out (Tensor): Output tensor of shape (B, T+1, embed_size),
+                      where the first token is the learnable CLS token.
+    """
+    def __init__(self, patch_size, embed_size, img_h, img_w, channels=3):
+        super().__init__()
+        self.cls_emb = nn.Parameter(torch.zeros((1, 1, embed_size)))
+        self.patch_size = patch_size
+        self.embed_size = embed_size
+        self.patch_dim = self.patch_size * self.patch_size * channels
+
+        self.to_flat_patches = Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)',
+                                         p1=patch_size, p2=patch_size)
+
+        self.embedder = nn.Linear(self.patch_dim, embed_size)
+        self.pe_table = posemb_sincos_2d(img_h // patch_size, img_w // patch_size, dim=embed_size)
+
+    def forward(self, x):
+        device = x.device
+        x = self.to_flat_patches(x)              # (B, T, patch_dim)
+        x = self.embedder(x)                     # (B, T, embed_size)
+        b, _, _ = x.size()
+
+        # Add positional encoding (broadcasted)
+        x = x + self.pe_table.to(device, dtype=x.dtype)  # (B, T, D)
+
+        # Prepend CLS token
+        x = torch.cat([self.cls_emb.expand(b, -1, -1), x], dim=1)  # (B, T+1, D)
+        return x
+
+
+class ViT(nn.Module):
+    """
+    Vision Transformer (ViT) model using CLS token for image classification.
+
+    Args:
+        embed_size (int): Dimensionality of patch embeddings.
+        input_h (int): Input image height.
+        input_w (int): Input image width.
+        patch_size (int): Size of image patches (square).
+        num_classes (int): Number of classification categories.
+        depth (int): Number of transformer blocks.
+        num_heads (int): Number of attention heads per block.
+
+    Inputs:
+        x (Tensor): Input image tensor of shape (B, C, H, W)
+
+    Returns:
+        out (Tensor): Output logits of shape (B, num_classes)
+    """
+    def __init__(self, embed_size, input_h, input_w, patch_size=2, num_classes=10, depth=4, num_heads=8):
+        super().__init__()
+        self.embedder = ImageEmbedderClsPE(patch_size, embed_size, img_h=input_h, img_w=input_w)
+
+        self.transformer = nn.Sequential(
+            *[TransformerBlock(embed_size=embed_size, dim=embed_size, num_heads=num_heads)
+              for _ in range(depth)]
+        )
+
+        self.classification_head = nn.Linear(embed_size, num_classes, bias=False)
+
+    def forward(self, x):
+        emb = self.embedder(x)           # (B, T+1, D)
+        latents = self.transformer(emb)  # (B, T+1, D)
+        cls_token = latents[:, 0, :]     # Extract [CLS] token (B, D)
+        out = self.classification_head(cls_token)  # (B, num_classes)
+        return out
